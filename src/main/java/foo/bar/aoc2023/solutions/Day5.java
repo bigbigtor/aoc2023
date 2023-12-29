@@ -4,32 +4,33 @@ import lombok.Builder;
 import org.apache.commons.lang3.Range;
 import org.springframework.stereotype.Component;
 
+import java.util.ArrayDeque;
+import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashSet;
+import java.util.Deque;
 import java.util.List;
-import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
-import java.util.stream.LongStream;
 import java.util.stream.Stream;
 
 @Component
 public class Day5 implements Solution<Long> {
 
     private enum SeedParseMode { INDIVIDUAL, RANGE }
-    private record Mapping(long srcIni, long dstIni, long count){}
+    private record Mapping(Range<Long> srcRange, Long mappingOffset){}
 
     @Builder
     private record CategoryMap(String source, String destination, List<Mapping> mappings){}
 
     @Builder
-    private record Almanac(Set<Long> seeds, List<CategoryMap> maps){}
+    private record Almanac(List<Range<Long>> seeds, List<CategoryMap> maps){}
 
     @Override
     public Long part1(Stream<String> input) {
         Almanac almanac = buildAlmanac(input, SeedParseMode.INDIVIDUAL);
         return almanac.seeds.stream()
-                .map(seed -> getLocation(seed, almanac.maps))
+                .flatMap(seeds -> getLocationRanges(seeds, almanac.maps).stream())
+                .map(Range::getMinimum)
                 .min(Long::compareTo)
                 .orElse(0L);
     }
@@ -38,40 +39,74 @@ public class Day5 implements Solution<Long> {
     public Long part2(Stream<String> input) {
         Almanac almanac = buildAlmanac(input, SeedParseMode.RANGE);
         return almanac.seeds.stream()
-                .map(seed -> getLocation(seed, almanac.maps))
+                .flatMap(seeds -> getLocationRanges(seeds, almanac.maps).stream())
+                .map(Range::getMinimum)
                 .min(Long::compareTo)
                 .orElse(0L);
     }
 
-    private Long getLocation(Long seed, List<CategoryMap> maps) {
+    private List<Range<Long>> getLocationRanges(Range<Long> seeds, List<CategoryMap> maps) {
         String currentComponent = "seed";
-        long currentValue = seed;
+        List<Range<Long>> currentRanges = List.of(seeds);
         while (!"location".equals(currentComponent)) {
             for (CategoryMap map : maps) {
                 if (map.source.equals(currentComponent)) {
                     currentComponent = map.destination;
-                    currentValue = getDestinationValue(currentValue, map);
+                    currentRanges = getDestinationRanges(currentRanges, map);
                 }
             }
         }
-        return currentValue;
+        return currentRanges;
     }
 
-    private Long getDestinationValue(Long sourceValue, CategoryMap map) {
-        for (Mapping mapping : map.mappings) {
-            var range = Range.of(mapping.srcIni, mapping.srcIni + mapping.count - 1);
-            if (range.contains(sourceValue)) {
-                return (sourceValue + (mapping.dstIni - mapping.srcIni));
+    private List<Range<Long>> getDestinationRanges(List<Range<Long>> sourceRanges, CategoryMap map) {
+        List<Range<Long>> result = new ArrayList<>();
+        Deque<Range<Long>> pending = new ArrayDeque<>(sourceRanges);
+        while (!pending.isEmpty()) {
+            var inputRange = pending.pop();
+            if (!hasMapping(inputRange, map.mappings)) {
+                result.add(inputRange);
+            } else {
+                for (Mapping mapping : map.mappings) {
+                    Range<Long> mappingSrc = mapping.srcRange;
+                    if (!mappingSrc.isOverlappedBy(inputRange)) {
+                        continue;
+                    } else if (mappingSrc.containsRange(inputRange)) {
+                        long dstMin = inputRange.getMinimum() + mapping.mappingOffset;
+                        long dstMax = inputRange.getMaximum() + mapping.mappingOffset;
+                        result.add(Range.of(dstMin, dstMax));
+                    } else if (inputRange.containsRange(mappingSrc)) {
+                        long dstMin = mappingSrc.getMinimum() + mapping.mappingOffset;
+                        long dstMax = mappingSrc.getMaximum() + mapping.mappingOffset;
+                        result.add(Range.of(dstMin, dstMax));
+                        pending.push(Range.of(inputRange.getMinimum(), mappingSrc.getMinimum() - 1));
+                        pending.push(Range.of(mappingSrc.getMaximum() + 1, inputRange.getMaximum()));
+                    } else if (inputRange.getMinimum() < mappingSrc.getMinimum()) {
+                        long dstMin = mappingSrc.getMinimum() + mapping.mappingOffset;
+                        long dstMax = inputRange.getMaximum() + mapping.mappingOffset;
+                        result.add(Range.of(dstMin, dstMax));
+                        pending.push(Range.of(inputRange.getMinimum(), mappingSrc.getMinimum() - 1));
+                    } else {
+                        long dstMin = inputRange.getMinimum() + mapping.mappingOffset;
+                        long dstMax = mappingSrc.getMaximum() + mapping.mappingOffset;
+                        result.add(Range.of(dstMin, dstMax));
+                        pending.push(Range.of(mappingSrc.getMaximum() + 1, inputRange.getMaximum()));
+                    }
+                }
             }
         }
-        return sourceValue;
+        return result;
+    }
+
+    private boolean hasMapping(Range<Long> input, List<Mapping> mappings) {
+        return mappings.stream().map(Mapping::srcRange).anyMatch(r -> r.isOverlappedBy(input));
     }
 
     private Almanac buildAlmanac(Stream<String> lines, SeedParseMode seedParseMode) {
         Almanac.AlmanacBuilder almanacBuilder = Almanac.builder();
         String input = lines.collect(Collectors.joining("\n"));
         String[] lineArray = input.split("\n\n");
-        almanacBuilder.seeds(buildSeeds(lineArray[0], seedParseMode));
+        almanacBuilder.seeds(buildSeedRanges(lineArray[0], seedParseMode));
         almanacBuilder.maps(
                 Arrays.stream(lineArray, 1, lineArray.length)
                         .map(line -> line.split("\n"))
@@ -100,21 +135,23 @@ public class Day5 implements Solution<Long> {
         long srcIni = Long.parseLong(split[1]);
         long dstIni = Long.parseLong(split[0]);
         long rngLen = Long.parseLong(split[2]);
-        return new Mapping(srcIni, dstIni, rngLen);
+        Range<Long> srcRange = Range.of(srcIni, srcIni + rngLen - 1);
+        return new Mapping(srcRange, dstIni - srcIni);
     }
 
-    private Set<Long> buildSeeds(String input, SeedParseMode seedParseMode) {
+    private List<Range<Long>> buildSeedRanges(String input, SeedParseMode seedParseMode) {
         String[] split = input.split("\\s");
         return switch (seedParseMode) {
             case INDIVIDUAL -> Arrays.stream(split, 1, split.length)
                     .map(Long::parseLong)
-                    .collect(Collectors.toSet());
+                    .map(seed -> Range.of(seed, seed))
+                    .toList();
             case RANGE -> {
-                Set<Long> result = new HashSet<>();
+                List<Range<Long>> result = new ArrayList<>();
                 for (int i = 1; i < split.length; i += 2) {
                     long iniSeed = Long.parseLong(split[i]);
                     long count = Long.parseLong(split[i + 1]);
-                    result.addAll(LongStream.range(iniSeed, iniSeed + count).boxed().collect(Collectors.toSet()));
+                    result.add(Range.of(iniSeed, iniSeed + count + 1));
                 }
                 yield result;
             }
